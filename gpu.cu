@@ -1,3 +1,9 @@
+// nvcc -o gpu gpu.cu
+// attention: the device-debug flag -G seems to break things
+// 
+// key and plaintext vectors are from
+// https://nvlpubs.nist.gov/nistpubs/FIPS/NIST.FIPS.197.pdf (C3 page 42)
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -369,7 +375,6 @@ void encryptdemo(uint8_t key[32], uint8_t *buf, unsigned long numbytes){
 
   cudaMemcpyToSymbol(sbox, sbox, sizeof(uint8_t)*256);
 
-  printf("\nBeginning encryption\n");
   aes256_init(key);
 
   cudaMalloc((void**)&buf_d, numbytes);
@@ -402,8 +407,6 @@ void decryptdemo(uint8_t key[32], uint8_t *buf, unsigned long numbytes){
 
   cudaMemcpyToSymbol(sboxinv, sboxinv, sizeof(uint8_t)*256);
 
-  printf("\nBeginning decryption\n");
-
   cudaMalloc((void**)&buf_d, numbytes);
   cudaMalloc((void**)&ctx_deckey_d, sizeof(ctx_deckey));
   cudaMalloc((void**)&ctx_key_d, sizeof(ctx_key));
@@ -414,7 +417,6 @@ void decryptdemo(uint8_t key[32], uint8_t *buf, unsigned long numbytes){
 
   dim3 dimBlock(ceil((double)numbytes / (double)(THREADS_PER_BLOCK * AES_BLOCK_SIZE)));
   dim3 dimGrid(THREADS_PER_BLOCK);
-  printf("Creating %d threads over %d blocks\n", dimBlock.x*dimGrid.x, dimBlock.x);
   aes256_decrypt_ecb<<<dimBlock, dimGrid>>>(buf_d, numbytes, ctx_deckey_d, ctx_key_d);
 
   cudaMemcpy(buf, buf_d, numbytes, cudaMemcpyDeviceToHost);
@@ -426,96 +428,49 @@ void decryptdemo(uint8_t key[32], uint8_t *buf, unsigned long numbytes){
   cudaFree(ctx_deckey_d);
 }
 
-
 __global__ void GPU_init() { }
 
-
+void print_hex_array(const unsigned char array[], int len) {
+    int i;
+    for (i = 0; i < len; ++i) {
+        printf("%02x", array[i]);
+    }
+}
 
 int main(){
 
-  // open file
-  FILE *file;
-  uint8_t *buf; 
-  unsigned long numbytes;
-  char *fname;
-  clock_t start, enc_time, dec_time, end;
-  int mili_sec, i;
-  int padding;
- 
-  uint8_t key[32];
-
-  int deviceCount = 0;
-  cudaError_t error_id = cudaGetDeviceCount(&deviceCount);
-
-  if (error_id != cudaSuccess){
-    printf("Error: %s\n", cudaGetErrorString(error_id));
-    printf("Exiting...\n");
-    exit(EXIT_FAILURE);
-  }
-
-  if (deviceCount == 0){
-    printf("There are no available device(s) that support CUDA\n");
-    exit(EXIT_FAILURE);
-  }
-
-
-  // handle txt file
-  fname = "input.txt";  
-  file = fopen(fname, "r");
-  if (file == NULL) {printf("File %s doesn't exist\n", fname); exit(1); }
-  printf("Opened file %s\n", fname);
-  fseek(file, 0L, SEEK_END);
-  numbytes = ftell(file);
-  printf("Size is %lu\n", numbytes);
-
-  // copy file into memory
-  fseek(file, 0L, SEEK_SET);
-  buf = (uint8_t*)calloc(numbytes, sizeof(uint8_t));
-  if(buf == NULL) exit(1);
-  if (fread(buf, 1, numbytes, file) != numbytes)
-  {
-    printf("Unable to read all bytes from file %s\n", fname);
-    exit(EXIT_FAILURE);
-  }
-  fclose(file);
-
-  // calculate the padding
-  padding = numbytes % AES_BLOCK_SIZE;
-  numbytes += padding;
-  printf("Padding file with %d bytes for a new size of %lu\n", padding, numbytes);
-
-  // generate key
-  for (i = 0; i < sizeof(key);i++) key[i] = i;
-
   // this is to force nvcc to put the gpu initialization here
   GPU_init<<<1, 1>>>();
+  
+  uint8_t buf[16] = {
+    0x00, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77,
+    0x88, 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff
+  };
+
+  printf("plaintext: ");
+  print_hex_array(buf, 16);
+  printf("\n");
+
+  unsigned long numbytes = 16;
+ 
+  uint8_t key[32] = {
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07,
+    0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f,
+    0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,
+    0x18, 0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f
+  };
 
   // encryption
-  start = clock();
   encryptdemo(key, buf, numbytes);
-  end = clock();
-  printf("time used:%f\n",  (double)(end - start) / CLOCKS_PER_SEC);
-  printf("GPU encryption throughput: %f bytes/second\n",  (double)(numbytes) / ((double)(end - start) / CLOCKS_PER_SEC));
-
-
-  // write into file
-  file = fopen("cipher.txt", "w");
-  fwrite(buf, 1, numbytes, file);
-  fclose(file);
+  printf("ciphertext: ");
+  print_hex_array(buf, 16);
+  printf("\n");
 
   // decryption
-  start = clock();
   decryptdemo(key, buf, numbytes);
-  end = clock();
-  printf("time used:%f\n",  (double)(end - start) / CLOCKS_PER_SEC);
-  printf("GPU encryption throughput: %f bytes/second\n",  (double)(numbytes) / ((double)(end - start) / CLOCKS_PER_SEC));
+  printf("decrypted: ");
+  print_hex_array(buf, 16);
+  printf("\n");
 
-
-  // write into file
-  file = fopen("output.txt", "w");
-  fwrite(buf, 1, numbytes - padding, file);
-  fclose(file);
-
-  free(buf);
   return EXIT_SUCCESS;
 }
